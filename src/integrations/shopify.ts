@@ -1,36 +1,47 @@
-import { config } from '../config.js';
+import { config, hasShopify } from '../config.js';
 
-function shopifyUrl(path: string) {
-  if (!config.SHOPIFY_STORE_DOMAIN) throw new Error('SHOPIFY_STORE_DOMAIN is not configured');
-  return `https://${config.SHOPIFY_STORE_DOMAIN}/admin/api/${config.SHOPIFY_API_VERSION}/${path}`;
-}
+const endpoint = () => `https://${config.SHOPIFY_STORE_DOMAIN}/admin/api/${config.SHOPIFY_API_VERSION}/graphql.json`;
 
-async function shopifyFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!config.SHOPIFY_ACCESS_TOKEN) throw new Error('SHOPIFY_ACCESS_TOKEN is not configured');
-  const response = await fetch(shopifyUrl(path), {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': config.SHOPIFY_ACCESS_TOKEN,
-      ...(init?.headers ?? {})
-    }
+export async function shopifyGraphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  if (!hasShopify()) throw new Error('Shopify is not configured');
+  const response = await fetch(endpoint(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_ACCESS_TOKEN! },
+    body: JSON.stringify({ query, variables }),
   });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`Shopify ${response.status}: ${text}`);
-  return text ? JSON.parse(text) as T : ({} as T);
+  const json = await response.json() as any;
+  if (!response.ok || json.errors) throw new Error(`Shopify API error: ${JSON.stringify(json.errors ?? json)}`);
+  return json.data as T;
 }
 
-export async function getShopifyOrders(limit = 20) {
-  return shopifyFetch<{ orders: unknown[] }>(`orders.json?status=any&limit=${Math.min(limit, 250)}`);
+export async function getOrders(first = 20) {
+  return shopifyGraphql<{ orders: { edges: { node: any }[] } }>(`
+    query Orders($first: Int!) {
+      orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+        edges { node {
+          id name createdAt displayFinancialStatus displayFulfillmentStatus
+          totalPriceSet { shopMoney { amount currencyCode } }
+          shippingAddress { name address1 address2 city province country countryCode zip phone }
+          lineItems(first: 50) { nodes { id title quantity sku variant { id } product { id title } } }
+        } }
+      }
+    }`, { first });
 }
 
-export async function getShopifyProducts(limit = 50) {
-  return shopifyFetch<{ products: unknown[] }>(`products.json?limit=${Math.min(limit, 250)}`);
+export async function getOrder(id: string) {
+  return shopifyGraphql<{ order: any }>(`query Order($id: ID!) { order(id: $id) { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } shippingAddress { name address1 address2 city province country countryCode zip phone } lineItems(first: 50) { nodes { id title quantity sku variant { id } product { id title } } } } }`, { id });
 }
 
-export async function updateShopifyOrderNote(orderId: string, note: string) {
-  return shopifyFetch<{ order: unknown }>(`orders/${orderId}.json`, {
-    method: 'PUT',
-    body: JSON.stringify({ order: { id: orderId, note } })
-  });
+export async function createFulfillment(orderId: string, trackingNumber: string, trackingUrl?: string) {
+  const order = await getOrder(orderId);
+  const fulfillmentOrderData = await shopifyGraphql<any>(`query FulfillmentOrders($id: ID!) { order(id: $id) { fulfillmentOrders(first: 20) { nodes { id status lineItems(first: 100) { nodes { id remainingQuantity } } } } } }`, { id: orderId });
+  const fo = fulfillmentOrderData.order?.fulfillmentOrders?.nodes?.find((x: any) => x.status === 'OPEN' || x.status === 'IN_PROGRESS');
+  if (!fo) return { skipped: true, reason: 'No open fulfillment order', order: order.order };
+  const lineItems = fo.lineItems.nodes.filter((x: any) => x.remainingQuantity > 0).map((x: any) => ({ id: x.id, quantity: x.remainingQuantity }));
+  const mutation = `mutation Fulfill($input: FulfillmentV2Input!) { fulfillmentCreateV2(fulfillment: $input) { fulfillment { id status trackingInfo { number url } } userErrors { field message } } }`;
+  return shopifyGraphql<any>(mutation, { input: { lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: lineItems }], trackingInfo: { number: trackingNumber, url: trackingUrl } } });
+}
+
+export async function updateOrderNote(orderId: string, note: string) {
+  return shopifyGraphql<any>(`mutation UpdateOrder($input: OrderInput!) { orderUpdate(input: $input) { order { id note } userErrors { field message } } }`, { input: { id: orderId, note } });
 }
