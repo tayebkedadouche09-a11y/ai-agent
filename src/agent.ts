@@ -1,71 +1,49 @@
 import OpenAI from 'openai';
-import { config, isConfigured } from './config.js';
-import { getShopifyOrders, getShopifyProducts } from './integrations/shopify.js';
-import { cjHealthCheck } from './integrations/cj.js';
+import { config, hasOpenAI } from './config.js';
+import { getOrders, getOrder, updateOrderNote } from './integrations/shopify.js';
+import { getCJBalance, getCJOrderList } from './integrations/cj.js';
+import { getState, log } from './state.js';
 
-const openai = config.OPENAI_API_KEY ? new OpenAI({ apiKey: config.OPENAI_API_KEY }) : null;
+const client = () => new OpenAI({ apiKey: config.OPENAI_API_KEY });
 
-export async function runAgentTask(task: string) {
-  if (!openai) throw new Error('OPENAI_API_KEY is not configured');
+const tools: any[] = [
+  { type: 'function', name: 'shopify_recent_orders', description: 'Read recent Shopify orders.', parameters: { type: 'object', properties: { first: { type: 'integer', minimum: 1, maximum: 50 } }, additionalProperties: false } },
+  { type: 'function', name: 'shopify_order', description: 'Read one Shopify order by GraphQL ID.', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
+  { type: 'function', name: 'cj_balance', description: 'Read CJ account balance.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+  { type: 'function', name: 'cj_recent_orders', description: 'Read recent CJ orders.', parameters: { type: 'object', properties: { page: { type: 'integer', minimum: 1 }, pageSize: { type: 'integer', minimum: 1, maximum: 50 } }, additionalProperties: false } },
+  { type: 'function', name: 'agent_state', description: 'Read agent mappings, approvals and recent logs.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
+];
 
-  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [
-    {
-      type: 'function',
-      function: {
-        name: 'get_shopify_orders',
-        description: 'Read recent Shopify orders.',
-        parameters: { type: 'object', properties: { limit: { type: 'number' } } }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'get_shopify_products',
-        description: 'Read Shopify products and inventory information.',
-        parameters: { type: 'object', properties: { limit: { type: 'number' } } }
-      }
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'cj_health_check',
-        description: 'Check that the CJ integration is configured.',
-        parameters: { type: 'object', properties: {} }
-      }
-    }
-  ];
-
-  let messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    {
-      role: 'system',
-      content: `You are the user's private Shopify + CJ store operations agent. Mode: ${config.AGENT_MODE}. Never invent order, inventory, customer, or CJ data. In approval mode, prepare actions but never claim an external action was completed unless a tool actually completed it. Configured integrations: ${JSON.stringify(isConfigured)}.`
-    },
-    { role: 'user', content: task }
-  ];
-
-  for (let round = 0; round < 5; round++) {
-    const response = await openai.chat.completions.create({
-      model: config.OPENAI_MODEL,
-      messages,
-      tools,
-      tool_choice: 'auto'
-    });
-    const message = response.choices[0]?.message;
-    if (!message) throw new Error('The AI returned no message');
-    messages.push(message);
-
-    if (!message.tool_calls?.length) return message.content ?? '';
-
-    for (const call of message.tool_calls) {
-      let result: unknown;
-      const args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
-      if (call.function.name === 'get_shopify_orders') result = await getShopifyOrders(args.limit ?? 20);
-      else if (call.function.name === 'get_shopify_products') result = await getShopifyProducts(args.limit ?? 50);
-      else if (call.function.name === 'cj_health_check') result = await cjHealthCheck();
-      else result = { error: `Unknown tool: ${call.function.name}` };
-      messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
-    }
+async function execute(name: string, args: any) {
+  switch (name) {
+    case 'shopify_recent_orders': return getOrders(args.first ?? 10);
+    case 'shopify_order': return getOrder(args.id);
+    case 'cj_balance': return getCJBalance();
+    case 'cj_recent_orders': return getCJOrderList(args.page ?? 1, args.pageSize ?? 20);
+    case 'agent_state': { const s = await getState(); return { mappings: s.mappings, pendingApprovals: s.pendingApprovals, logs: s.logs.slice(0, 30) }; }
+    default: throw new Error(`Unknown tool: ${name}`);
   }
+}
 
-  throw new Error('Agent exceeded its tool-call limit');
+export async function askAgent(input: string) {
+  if (!hasOpenAI()) return { text: 'OpenAI is not configured yet. Add OPENAI_API_KEY to .env.', configured: false };
+  const response = await client().responses.create({
+    model: config.OPENAI_MODEL,
+    instructions: `You are the user's autonomous Shopify + CJ store manager. Be operational and concise. Never invent order, stock, cost, payment or tracking data. Use tools for live facts. Current mode: ${config.AGENT_MODE}. In approval mode, never claim a real CJ order was paid or submitted unless the API confirms it.`,
+    input,
+    tools,
+    store: false,
+  });
+
+  const calls = (response.output as any[]).filter(x => x.type === 'function_call');
+  if (!calls.length) return { text: response.output_text, configured: true };
+
+  const outputs: any[] = [];
+  for (const call of calls) {
+    try { outputs.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(await execute(call.name, JSON.parse(call.arguments))) }); }
+    catch (error) { outputs.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify({ error: String(error) }) }); }
+  }
+  const final = await client().responses.create({ model: config.OPENAI_MODEL, instructions: 'Summarize the tool results accurately. Do not invent actions.', previous_response_id: response.id, input: outputs, store: false });
+  await log('info', 'agent.query', { input });
+  return { text: final.output_text, configured: true };
 }
