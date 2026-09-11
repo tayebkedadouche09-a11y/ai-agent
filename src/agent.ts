@@ -10,7 +10,7 @@ const tools: any[] = [
   { type: 'function', name: 'shopify_recent_orders', description: 'Read recent Shopify orders.', parameters: { type: 'object', properties: { first: { type: 'integer', minimum: 1, maximum: 50 } }, additionalProperties: false } },
   { type: 'function', name: 'shopify_order', description: 'Read one Shopify order by GraphQL ID.', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'], additionalProperties: false } },
   { type: 'function', name: 'cj_balance', description: 'Read CJ account balance.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
-  { type: 'function', name: 'cj_recent_orders', description: 'Read recent CJ orders.', parameters: { type: 'object', { }, additionalProperties: false } },
+  { type: 'function', name: 'cj_recent_orders', description: 'Read recent CJ orders.', parameters: { type: 'object', properties: { page: { type: 'integer', minimum: 1 }, pageSize: { type: 'integer', minimum: 1, maximum: 50 } }, additionalProperties: false } },
   { type: 'function', name: 'agent_state', description: 'Read agent mappings, approvals and recent logs.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 
