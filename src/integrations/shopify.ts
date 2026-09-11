@@ -2,14 +2,43 @@ import { config, hasShopify } from '../config.js';
 
 const endpoint = () => `https://${config.SHOPIFY_STORE_DOMAIN}/admin/api/${config.SHOPIFY_API_VERSION}/graphql.json`;
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function requestWithRetry(url: string, init: RequestInit, attempts = 3) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await fetch(url, init);
+      if (response.ok || ![429, 500, 502, 503, 504].includes(response.status) || attempt === attempts) return response;
+      const retryAfter = Number(response.headers.get('retry-after') ?? '');
+      await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 10000) : attempt * 1000);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) throw error;
+      await sleep(attempt * 1000);
+    }
+  }
+  throw lastError ?? new Error('Shopify request failed');
+}
+
 export async function shopifyGraphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
   if (!hasShopify()) throw new Error('Shopify is not configured');
-  const response = await fetch(endpoint(), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_ACCESS_TOKEN! }, body: JSON.stringify({ query, variables }) });
+  const response = await requestWithRetry(endpoint(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_ACCESS_TOKEN! },
+    body: JSON.stringify({ query, variables }),
+  });
   const text = await response.text();
   let json: any;
   try { json = JSON.parse(text); } catch { throw new Error(`Shopify API returned non-JSON (${response.status})`); }
   if (!response.ok || json.errors) throw new Error(`Shopify API error: ${JSON.stringify(json.errors ?? json)}`);
   return json.data as T;
+}
+
+function assertUserErrors(result: any, operation: string) {
+  const errors = result?.userErrors ?? [];
+  if (errors.length) throw new Error(`Shopify ${operation} error: ${JSON.stringify(errors)}`);
+  return result;
 }
 
 const orderFields = `id name createdAt email displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } shippingAddress { name address1 address2 city province country countryCode zip phone } lineItems(first: 50) { nodes { id title quantity sku variant { id } product { id title } } }`;
@@ -29,9 +58,11 @@ export async function createFulfillment(orderId: string, trackingNumber: string,
   const lineItems = fo.lineItems.nodes.filter((x: any) => x.remainingQuantity > 0).map((x: any) => ({ id: x.id, quantity: x.remainingQuantity }));
   if (!lineItems.length) return { skipped: true, reason: 'No remaining fulfillment line items' };
   const mutation = `mutation Fulfill($input: FulfillmentInput!) { fulfillmentCreate(fulfillment: $input) { fulfillment { id status trackingInfo { number url } } userErrors { field message } } }`;
-  return shopifyGraphql<any>(mutation, { input: { lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: lineItems }], notifyCustomer: true, trackingInfo: { number: trackingNumber, url: trackingUrl } } });
+  const data = await shopifyGraphql<any>(mutation, { input: { lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: lineItems }], notifyCustomer: true, trackingInfo: { number: trackingNumber, url: trackingUrl } } });
+  return assertUserErrors(data.fulfillmentCreate, 'fulfillmentCreate');
 }
 
 export async function updateOrderNote(orderId: string, note: string) {
-  return shopifyGraphql<any>(`mutation UpdateOrder($input: OrderInput!) { orderUpdate(input: $input) { order { id note } userErrors { field message } } }`, { input: { id: orderId, note } });
+  const data = await shopifyGraphql<any>(`mutation UpdateOrder($input: OrderInput!) { orderUpdate(input: $input) { order { id note } userErrors { field message } } }`, { input: { id: orderId, note } });
+  return assertUserErrors(data.orderUpdate, 'orderUpdate');
 }
