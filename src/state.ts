@@ -15,19 +15,30 @@ export interface State {
 
 const empty: State = { processedShopifyOrders: [], mappings: {}, pendingApprovals: {}, cjOrders: {}, dailySpend: {}, logs: [] };
 let cache: State | null = null;
+let saveQueue = Promise.resolve();
 
 async function load() {
   if (cache) return cache;
   try {
     cache = JSON.parse(await readFile(file, 'utf8')) as State;
     cache.dailySpend ??= {};
-  } catch { cache = structuredClone(empty); await save(); }
+    cache.processedShopifyOrders ??= [];
+    cache.mappings ??= {};
+    cache.pendingApprovals ??= {};
+    cache.cjOrders ??= {};
+    cache.logs ??= [];
+  } catch {
+    cache = structuredClone(empty);
+    await save();
+  }
   return cache!;
 }
 
 async function save() {
   await mkdir(config.DATA_DIR, { recursive: true });
-  await writeFile(file, JSON.stringify(cache ?? empty, null, 2), 'utf8');
+  const snapshot = JSON.stringify(cache ?? empty, null, 2);
+  saveQueue = saveQueue.then(() => writeFile(file, snapshot, 'utf8'));
+  await saveQueue;
 }
 
 export async function getState() { return load(); }
