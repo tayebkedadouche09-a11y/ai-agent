@@ -1,6 +1,7 @@
 import { config, hasShopify } from '../config.js';
 
 const endpoint = () => `https://${config.SHOPIFY_STORE_DOMAIN}/admin/api/${config.SHOPIFY_API_VERSION}/graphql.json`;
+const tokenEndpoint = () => `https://${config.SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token`;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -21,18 +22,75 @@ async function requestWithRetry(url: string, init: RequestInit, attempts = 3) {
   throw lastError ?? new Error('Shopify request failed');
 }
 
+type TokenCache = { accessToken: string; expiresAt: number };
+let tokenCache: TokenCache | null = null;
+let tokenRequest: Promise<string> | null = null;
+
+async function getShopifyAccessToken(forceRefresh = false): Promise<string> {
+  if (!hasShopify()) throw new Error('Shopify is not configured');
+
+  const now = Date.now();
+  if (!forceRefresh && tokenCache && tokenCache.expiresAt > now + 60_000) return tokenCache.accessToken;
+
+  if (tokenRequest) return tokenRequest;
+
+  tokenRequest = (async () => {
+    const response = await requestWithRetry(tokenEndpoint(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: config.SHOPIFY_CLIENT_ID!,
+        client_secret: config.SHOPIFY_CLIENT_SECRET!,
+      }).toString(),
+    });
+
+    const text = await response.text();
+    let json: any;
+    try { json = JSON.parse(text); } catch { throw new Error(`Shopify token endpoint returned non-JSON (${response.status})`); }
+    if (!response.ok || !json.access_token) {
+      throw new Error(`Shopify token error: ${JSON.stringify(json)}`);
+    }
+
+    const expiresIn = Number(json.expires_in ?? 86400);
+    tokenCache = {
+      accessToken: json.access_token,
+      expiresAt: Date.now() + Math.max(60_000, expiresIn * 1000),
+    };
+    return json.access_token as string;
+  })();
+
+  try {
+    return await tokenRequest;
+  } finally {
+    tokenRequest = null;
+  }
+}
+
 export async function shopifyGraphql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
   if (!hasShopify()) throw new Error('Shopify is not configured');
-  const response = await requestWithRetry(endpoint(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': config.SHOPIFY_ACCESS_TOKEN! },
-    body: JSON.stringify({ query, variables }),
-  });
-  const text = await response.text();
-  let json: any;
-  try { json = JSON.parse(text); } catch { throw new Error(`Shopify API returned non-JSON (${response.status})`); }
-  if (!response.ok || json.errors) throw new Error(`Shopify API error: ${JSON.stringify(json.errors ?? json)}`);
-  return json.data as T;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const accessToken = await getShopifyAccessToken(attempt === 1);
+    const response = await requestWithRetry(endpoint(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': accessToken },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    const text = await response.text();
+    let json: any;
+    try { json = JSON.parse(text); } catch { throw new Error(`Shopify API returned non-JSON (${response.status})`); }
+
+    if ((response.status === 401 || response.status === 403) && attempt === 0) {
+      tokenCache = null;
+      continue;
+    }
+    if (!response.ok || json.errors) throw new Error(`Shopify API error: ${JSON.stringify(json.errors ?? json)}`);
+    return json.data as T;
+  }
+
+  throw new Error('Shopify authentication failed after token refresh');
 }
 
 function assertUserErrors(result: any, operation: string) {
