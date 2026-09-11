@@ -6,7 +6,8 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default('gpt-5.6'),
   SHOPIFY_STORE_DOMAIN: z.string().optional(),
-  SHOPIFY_ACCESS_TOKEN: z.string().optional(),
+  SHOPIFY_CLIENT_ID: z.string().optional(),
+  SHOPIFY_CLIENT_SECRET: z.string().optional(),
   SHOPIFY_API_VERSION: z.string().default('2026-07'),
   SHOPIFY_WEBHOOK_SECRET: z.string().optional(),
   CJ_ACCESS_TOKEN: z.string().optional(),
@@ -22,6 +23,8 @@ const schema = z.object({
 });
 
 export const config = schema.parse(process.env);
-export function hasShopify() { return Boolean(config.SHOPIFY_STORE_DOMAIN && config.SHOPIFY_ACCESS_TOKEN); }
+export function hasShopify() {
+  return Boolean(config.SHOPIFY_STORE_DOMAIN && config.SHOPIFY_CLIENT_ID && config.SHOPIFY_CLIENT_SECRET);
+}
 export function hasCJ() { return Boolean(config.CJ_ACCESS_TOKEN); }
 export function hasOpenAI() { return Boolean(config.OPENAI_API_KEY); }
