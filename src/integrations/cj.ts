@@ -1,30 +1,74 @@
-import { config } from '../config.js';
+import { config, hasCJ } from '../config.js';
 
-async function cjFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  if (!config.CJ_ACCESS_TOKEN) throw new Error('CJ_ACCESS_TOKEN is not configured');
-  const base = config.CJ_API_BASE_URL.replace(/\/$/, '');
-  const response = await fetch(`${base}/${path.replace(/^\//, '')}`, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      'CJ-Access-Token': config.CJ_ACCESS_TOKEN,
-      ...(init?.headers ?? {})
-    }
+const base = 'https://developers.cjdropshipping.com/api2.0/v1';
+
+async function cjRequest<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  if (!hasCJ()) throw new Error('CJ is not configured');
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json');
+  headers.set('CJ-Access-Token', config.CJ_ACCESS_TOKEN!);
+  if (config.CJ_PLATFORM_TOKEN) headers.set('platformToken', config.CJ_PLATFORM_TOKEN);
+  const response = await fetch(`${base}${path}`, { ...init, headers });
+  const json = await response.json() as any;
+  if (!response.ok || json.success === false || (json.code && json.code !== 200)) {
+    throw new Error(`CJ API error: ${JSON.stringify(json)}`);
+  }
+  return json as T;
+}
+
+export async function getCJBalance() {
+  return cjRequest('/shopping/pay/getBalance', { method: 'GET' });
+}
+
+export async function getVariantStock(vid: string) {
+  return cjRequest('/product/stock/queryByVid', { method: 'GET', headers: { Accept: 'application/json' } });
+}
+
+export interface CJOrderInput {
+  orderNumber: string;
+  shippingZip?: string;
+  shippingCountryCode: string;
+  shippingCountry: string;
+  shippingProvince?: string;
+  shippingCity: string;
+  shippingCounty?: string;
+  shippingPhone?: string;
+  shippingCustomerName: string;
+  shippingAddress: string;
+  shippingAddress2?: string;
+  email?: string;
+  shopAmount?: string;
+  logisticName: string;
+  fromCountryCode: string;
+  platform?: string;
+  shopLogisticsType?: number;
+  storeName?: string;
+  orderFlow?: number;
+  payType?: number;
+  products: Array<{ vid?: string; sku?: string; storeProductId?: string; storeProductName?: string; storeSku?: string; variantOptions?: string; quantity: number; unitPrice?: string; storeLineItemId?: string }>;
+}
+
+export async function createCJOrder(input: CJOrderInput) {
+  return cjRequest('/shopping/order/createOrderV3', {
+    method: 'POST',
+    body: JSON.stringify({
+      ...input,
+      platform: input.platform ?? 'shopify',
+      orderFlow: input.orderFlow ?? 2,
+      shopLogisticsType: input.shopLogisticsType ?? 2,
+      payType: input.payType ?? 3,
+    }),
   });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`CJ ${response.status}: ${text}`);
-  return text ? JSON.parse(text) as T : ({} as T);
 }
 
-/**
- * CJ API calls are kept behind this adapter so endpoint changes do not leak
- * into the agent. Concrete endpoints are added only after the user's CJ API
- * account/version is confirmed.
- */
-export async function cjHealthCheck() {
-  return { configured: true, baseUrl: config.CJ_API_BASE_URL };
+export async function getCJOrderList(pageNum = 1, pageSize = 20) {
+  return cjRequest(`/shopping/order/list?pageNum=${pageNum}&pageSize=${pageSize}`, { method: 'GET' });
 }
 
-export async function cjRequest<T>(path: string, init?: RequestInit) {
-  return cjFetch<T>(path, init);
+export async function getCJOrderDetail(orderId: string) {
+  return cjRequest(`/shopping/order/getOrderDetail?orderId=${encodeURIComponent(orderId)}`, { method: 'GET' });
+}
+
+export async function calculateFreight(payload: Record<string, unknown>) {
+  return cjRequest('/logistic/freightCalculate', { method: 'POST', body: JSON.stringify(payload) });
 }
