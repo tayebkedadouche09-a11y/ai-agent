@@ -5,13 +5,14 @@ import { getState, log, mutate, utcDay } from './state.js';
 
 function cleanAddress(address: any) {
   if (!address) throw new Error('Customer shipping address is missing');
-  if (!address.countryCode || !address.city || !address.address1 || !address.name) throw new Error('Customer shipping address is incomplete');
+  if (!address.countryCode || !address.country || !address.city || !address.address1 || !address.name) throw new Error('Customer shipping address is incomplete');
   return address;
 }
 
 function amountOf(order: any) { return Number(order.totalPriceSet?.shopMoney?.amount ?? 0); }
 
 function validateAutopilotBudget(state: Awaited<ReturnType<typeof getState>>, amount: number) {
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error(`Invalid Shopify order amount: ${amount}`);
   if (amount > config.MAX_AUTO_CJ_USD) throw new Error(`Order value ${amount} exceeds MAX_AUTO_CJ_USD=${config.MAX_AUTO_CJ_USD}`);
   const day = utcDay();
   const spent = state.dailySpend[day] ?? 0;
@@ -47,11 +48,14 @@ export async function processShopifyOrder(orderId: string) {
     await log('warn', 'order.partially_paid', { orderId });
     return { status: 'waiting_full_payment', orderId };
   }
+  if (['CANCELLED', 'REFUNDED', 'VOIDED'].includes(order.displayFinancialStatus)) return { status: 'not_eligible', orderId };
   if (order.displayFulfillmentStatus === 'FULFILLED') return { status: 'already_fulfilled', orderId };
 
   const address = cleanAddress(order.shippingAddress);
   const products = buildProducts(order, state.mappings);
+  if (!products.length) throw new Error('Shopify order has no line items');
   if (products.some((p: any) => !p.vid && !p.sku && !p.storeSku)) throw new Error('A Shopify line item has no SKU/mapping');
+  if (products.some((p: any) => !Number.isInteger(p.quantity) || p.quantity < 1)) throw new Error('A Shopify line item has an invalid quantity');
 
   const amount = amountOf(order);
   const proposal = {
@@ -66,7 +70,7 @@ export async function processShopifyOrder(orderId: string) {
 
   if (config.AGENT_MODE === 'approval' || !config.CJ_LOGISTIC_NAME) {
     await mutate(s => { s.pendingApprovals[order.id] = proposal; });
-    await log('info', 'order.awaiting_approval', proposal);
+    await log('info', 'order.awaiting_approval', { orderId: order.id, orderNumber: order.name });
     return { status: 'awaiting_approval', proposal };
   }
 
@@ -91,21 +95,25 @@ export async function processShopifyOrder(orderId: string) {
   });
 
   await mutate(s => {
+    if (s.processedShopifyOrders.includes(order.id)) return;
     s.processedShopifyOrders.push(order.id);
     s.cjOrders[order.id] = result;
     s.dailySpend[utcDay()] = (s.dailySpend[utcDay()] ?? 0) + amount;
     delete s.pendingApprovals[order.id];
   });
-  await log('info', 'order.sent_to_cj', { orderId, result });
+  await log('info', 'order.sent_to_cj', { orderId, orderNumber: order.name });
   return { status: 'sent_to_cj', result };
 }
 
 export async function approveOrder(orderId: string) {
   const state = await getState();
+  if (state.processedShopifyOrders.includes(orderId)) throw new Error('Order is already processed');
   const proposal = state.pendingApprovals[orderId];
   if (!proposal) throw new Error('No pending approval for this order');
   if (!config.CJ_LOGISTIC_NAME) throw new Error('CJ_LOGISTIC_NAME is required before approval');
-  const address = proposal.customer;
+  const amount = Number(proposal.total?.amount ?? 0);
+  validateAutopilotBudget(state, amount);
+  const address = cleanAddress(proposal.customer);
   const result = await createCJOrder({
     orderNumber: proposal.orderNumber,
     shippingZip: address.zip,
@@ -118,14 +126,20 @@ export async function approveOrder(orderId: string) {
     shippingAddress: address.address1,
     shippingAddress2: address.address2 ?? '',
     email: proposal.email ?? '',
-    shopAmount: String(proposal.total?.amount ?? ''),
+    shopAmount: String(amount),
     logisticName: config.CJ_LOGISTIC_NAME,
     fromCountryCode: config.CJ_FROM_COUNTRY_CODE,
     products: proposal.products,
     payType: 2,
   });
-  await mutate(s => { s.processedShopifyOrders.push(orderId); s.cjOrders[orderId] = result; delete s.pendingApprovals[orderId]; });
-  await log('info', 'order.approved_to_cj', { orderId, result });
+  await mutate(s => {
+    if (s.processedShopifyOrders.includes(orderId)) return;
+    s.processedShopifyOrders.push(orderId);
+    s.cjOrders[orderId] = result;
+    s.dailySpend[utcDay()] = (s.dailySpend[utcDay()] ?? 0) + amount;
+    delete s.pendingApprovals[orderId];
+  });
+  await log('info', 'order.approved_to_cj', { orderId, orderNumber: proposal.orderNumber });
   return result;
 }
 
