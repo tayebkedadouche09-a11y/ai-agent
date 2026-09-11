@@ -9,7 +9,9 @@ async function cjRequest<T = any>(path: string, init: RequestInit = {}): Promise
   headers.set('CJ-Access-Token', config.CJ_ACCESS_TOKEN!);
   if (config.CJ_PLATFORM_TOKEN) headers.set('platformToken', config.CJ_PLATFORM_TOKEN);
   const response = await fetch(`${base}${path}`, { ...init, headers });
-  const json = await response.json() as any;
+  const text = await response.text();
+  let json: any;
+  try { json = JSON.parse(text); } catch { throw new Error(`CJ API returned non-JSON (${response.status})`); }
   if (!response.ok || json.success === false || (json.code && json.code !== 200)) {
     throw new Error(`CJ API error: ${JSON.stringify(json)}`);
   }
@@ -21,7 +23,7 @@ export async function getCJBalance() {
 }
 
 export async function getVariantStock(vid: string) {
-  return cjRequest('/product/stock/queryByVid', { method: 'GET', headers: { Accept: 'application/json' } });
+  return cjRequest(`/product/stock/queryByVid?vid=${encodeURIComponent(vid)}`, { method: 'GET', headers: { Accept: 'application/json' } });
 }
 
 export interface CJOrderInput {
@@ -49,14 +51,14 @@ export interface CJOrderInput {
 }
 
 export async function createCJOrder(input: CJOrderInput) {
-  return cjRequest('/shopping/order/createOrderV3', {
+  return cjRequest('/shopping/order/createOrderV2', {
     method: 'POST',
     body: JSON.stringify({
       ...input,
       platform: input.platform ?? 'shopify',
       orderFlow: input.orderFlow ?? 2,
       shopLogisticsType: input.shopLogisticsType ?? 2,
-      payType: input.payType ?? 3,
+      payType: input.payType ?? 2,
     }),
   });
 }
