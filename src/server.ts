@@ -15,8 +15,7 @@ function safeEqual(a: string, b: string) {
   return aa.length > 0 && aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
 }
 function verifyHmac(raw: Buffer, signature: string | undefined, secret: string | undefined) {
-  if (!secret) return false;
-  if (!signature) return false;
+  if (!secret || !signature) return false;
   return safeEqual(crypto.createHmac('sha256', secret).update(raw).digest('base64'), signature);
 }
 function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -41,8 +40,10 @@ app.post('/api/agent', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/approvals/:orderId/approve', requireAdmin, async (req, res) => {
-  try { res.json({ ok: true, result: await approveOrder(req.params.orderId) }); }
-  catch (e) { res.status(400).json({ error: String(e) }); }
+  try {
+    const orderId = Array.isArray(req.params.orderId) ? req.params.orderId[0] : req.params.orderId;
+    res.json({ ok: true, result: await approveOrder(orderId) });
+  } catch (e) { res.status(400).json({ error: String(e) }); }
 });
 
 app.post('/webhooks/shopify/orders-create', async (req: any, res) => {
