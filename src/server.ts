@@ -125,8 +125,8 @@ const DASHBOARD = `<!doctype html><html><head><meta charset="utf-8"><meta name="
     const headers = { ...(options.headers || {}), 'X-Admin-Secret': key() };
     const response = await fetch(url, { ...options, headers });
     let data;
-    try { data = await response.json(); } catch { data = { error: `HTTP ${response.status}` }; }
-    if (!response.ok && !data.error) data.error = `HTTP ${response.status}`;
+    try { data = await response.json(); } catch { data = { error: 'HTTP ' + response.status }; }
+    if (!response.ok && !data.error) data.error = 'HTTP ' + response.status;
     return data;
   }
 
