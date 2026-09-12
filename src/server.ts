@@ -114,6 +114,65 @@ async function syncPaidOrders() {
 
 app.get('/', (_req, res) => res.type('html').send(DASHBOARD));
 
-const DASHBOARD = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Store Manager</title><style>body{font-family:Inter,system-ui;margin:0;background:#0b1020;color:#eef2ff}main{max-width:1100px;margin:auto;padding:28px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.card{background:#121a2e;border:1px solid #26304a;border-radius:16px;padding:18px}.ok{color:#5ee89a}.bad{color:#ff7272}button{background:#6d5dfc;color:white;border:0;padding:10px 14px;border-radius:10px;cursor:pointer}input,textarea{width:100%;box-sizing:border-box;background:#0b1020;color:white;border:1px solid #26304a;border-radius:10px;padding:12px}pre{white-space:pre-wrap;background:#080c16;padding:14px;border-radius:12px;max-height:360px;overflow:auto}.muted{color:#9aa7c2}</style></head><body><main><h1>🤖 AI Store Manager</h1><p class="muted">Shopify + CJdropshipping autonomous operations center</p><div class="card"><input id="secret" type="password" placeholder="Dashboard secret"><button onclick="saveSecret()">Unlock</button></div><div id="cards" class="grid" style="margin-top:14px"></div><div class="card" style="margin-top:14px"><h2>Ask the agent</h2><textarea id="q" rows="3" placeholder="Check my store status, orders, CJ balance..."></textarea><br><br><button onclick="ask()">Ask AI</button><pre id="answer">Ready.</pre></div><div class="card" style="margin-top:14px"><h2>Pending approvals</h2><pre id="pending">Loading...</pre></div><div class="card" style="margin-top:14px"><h2>Recent activity</h2><pre id="logs">Loading...</pre></div></main><script>const key=()=>sessionStorage.getItem('adminSecret')||'';function saveSecret(){sessionStorage.setItem('adminSecret',document.querySelector('#secret').value);load()}async function j(u,o={}){o.headers={...(o.headers||{}),'X-Admin-Secret':key()};let r=await fetch(u,o);return r.json()}async function load(){let h=await j('/api/health'),s=await j('/api/state');if(s.error){document.querySelector('#answer').textContent=s.error;return}document.querySelector('#cards').innerHTML=[['OpenAI',h.integrations.openai],['Shopify',h.integrations.shopify],['CJ',h.integrations.cj],['Mode',h.mode],['Pending',h.pendingApprovals],['Processed',h.processed]].map(x=>'<div class="card"><div class="muted">'+x[0]+'</div><h2 class="'+(typeof x[1]==='boolean'?(x[1]?'ok':'bad'):'')+'">'+x[1]+'</h2></div>').join('');document.querySelector('#pending').textContent=JSON.stringify(s.pendingApprovals,null,2);document.querySelector('#logs').textContent=JSON.stringify(s.logs.slice(0,30),null,2)}async function ask(){document.querySelector('#answer').textContent='Thinking...';let r=await j('/api/agent',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:document.querySelector('#q').value})});document.querySelector('#answer').textContent=r.text||r.error;load()}load();setInterval(load,10000)</script></body></html>`;
+const DASHBOARD = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Store Manager</title><style>body{font-family:Inter,system-ui;margin:0;background:#0b1020;color:#eef2ff}main{max-width:1100px;margin:auto;padding:28px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px}.card{background:#121a2e;border:1px solid #26304a;border-radius:16px;padding:18px}.ok{color:#5ee89a}.bad{color:#ff7272}button{background:#6d5dfc;color:white;border:0;padding:10px 14px;border-radius:10px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}input,textarea{width:100%;box-sizing:border-box;background:#0b1020;color:white;border:1px solid #26304a;border-radius:10px;padding:12px}pre{white-space:pre-wrap;background:#080c16;padding:14px;border-radius:12px;max-height:360px;overflow:auto}.muted{color:#9aa7c2}</style></head><body><main><h1>🤖 AI Store Manager</h1><p class="muted">Shopify + CJdropshipping autonomous operations center</p><div class="card"><input id="secret" type="password" placeholder="Dashboard secret"><button id="unlock" type="button">Unlock</button><div id="authStatus" class="muted" style="margin-top:10px"></div></div><div id="cards" class="grid" style="margin-top:14px"></div><div class="card" style="margin-top:14px"><h2>Ask the agent</h2><textarea id="q" rows="3" placeholder="Check my store status, orders, CJ balance..."></textarea><br><br><button id="ask" type="button">Ask AI</button><pre id="answer">Ready.</pre></div><div class="card" style="margin-top:14px"><h2>Pending approvals</h2><pre id="pending">Loading...</pre></div><div class="card" style="margin-top:14px"><h2>Recent activity</h2><pre id="logs">Loading...</pre></div></main><script>
+(() => {
+  'use strict';
+  const key = () => sessionStorage.getItem('adminSecret') || '';
+  const el = (id) => document.getElementById(id);
+  const setStatus = (text) => { const node = el('authStatus'); if (node) node.textContent = text; };
+
+  async function j(url, options = {}) {
+    const headers = { ...(options.headers || {}), 'X-Admin-Secret': key() };
+    const response = await fetch(url, { ...options, headers });
+    let data;
+    try { data = await response.json(); } catch { data = { error: `HTTP ${response.status}` }; }
+    if (!response.ok && !data.error) data.error = `HTTP ${response.status}`;
+    return data;
+  }
+
+  async function load() {
+    try {
+      const h = await j('/api/health');
+      const s = await j('/api/state');
+      if (s.error) {
+        el('answer').textContent = s.error;
+        if (s.error === 'Unauthorized') setStatus('Invalid dashboard secret.');
+        else setStatus(s.error);
+        return;
+      }
+      setStatus('Dashboard unlocked.');
+      el('cards').innerHTML = [['OpenAI',h.integrations.openai],['Shopify',h.integrations.shopify],['CJ',h.integrations.cj],['Mode',h.mode],['Pending',h.pendingApprovals],['Processed',h.processed]].map(x => '<div class="card"><div class="muted">'+x[0]+'</div><h2 class="'+(typeof x[1]==='boolean'?(x[1]?'ok':'bad'):'')+'">'+x[1]+'</h2></div>').join('');
+      el('pending').textContent = JSON.stringify(s.pendingApprovals, null, 2);
+      el('logs').textContent = JSON.stringify(s.logs.slice(0,30), null, 2);
+    } catch (error) {
+      setStatus('Dashboard error: ' + String(error));
+      el('answer').textContent = String(error);
+    }
+  }
+
+  async function saveSecret() {
+    const secret = el('secret').value.trim();
+    if (!secret) { setStatus('Enter the dashboard secret first.'); el('secret').focus(); return; }
+    sessionStorage.setItem('adminSecret', secret);
+    setStatus('Checking secret...');
+    await load();
+  }
+
+  async function ask() {
+    el('answer').textContent = 'Thinking...';
+    try {
+      const r = await j('/api/agent', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({message: el('q').value}) });
+      el('answer').textContent = r.text || r.error || 'No response.';
+      await load();
+    } catch (error) { el('answer').textContent = String(error); }
+  }
+
+  el('unlock').addEventListener('click', saveSecret);
+  el('secret').addEventListener('keydown', (event) => { if (event.key === 'Enter') saveSecret(); });
+  el('ask').addEventListener('click', ask);
+  load();
+  setInterval(load, 10000);
+})();
+</script></body></html>`;
 
 app.listen(config.PORT, () => { console.log(`AI Store Manager listening on http://localhost:${config.PORT}`); void syncPaidOrders(); setInterval(syncPaidOrders, 60000); });
